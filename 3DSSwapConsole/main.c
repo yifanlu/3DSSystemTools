@@ -14,7 +14,7 @@ static u32 kproc_offset_pid;
 static u32 self_pid;
 static u32 curr_kproc;
 static Handle cfgHandle = 0;
-extern Handle fsuHandle;
+static Handle fsuHandle;
 static Handle fsregHandle;
 
 // service patching code thanks to archshift
