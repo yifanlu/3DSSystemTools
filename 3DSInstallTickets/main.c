@@ -282,55 +282,19 @@ static Result AM_SetCertificates(int count, const u8 *certs[4], u32 sizes[4])
 	return (Result)cmdbuf[1];
 }
 
-static Result AM9_InstallTikBegin(void)
+static Result AM_DeleteTitle_(u8 mediatype, u64 titleID)
 {
-	Result ret = 0;
-	u32 *cmdbuf = getThreadCommandBuffer();
+  Result ret = 0;
+  u32 *cmdbuf = getThreadCommandBuffer();
 
-	cmdbuf[0] = 0x00090000;
+  cmdbuf[0] = 0x041000C0;
+  cmdbuf[1] = mediatype;
+  cmdbuf[2] = titleID & 0xffffffff;
+  cmdbuf[3] = (u32)(titleID >> 32);
 
-	if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
-	
-	return (Result)cmdbuf[1];
-}
+  if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
 
-static Result AM9_InstallTikAbort(void)
-{
-	Result ret = 0;
-	u32 *cmdbuf = getThreadCommandBuffer();
-
-	cmdbuf[0] = 0x000B0000;
-
-	if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
-	
-	return (Result)cmdbuf[1];
-}
-
-static Result AM9_InstallTikFinish(void)
-{
-	Result ret = 0;
-	u32 *cmdbuf = getThreadCommandBuffer();
-
-	cmdbuf[0] = 0x000C0000;
-
-	if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
-	
-	return (Result)cmdbuf[1];
-}
-
-static Result AM9_InstallTikWrite(const char *data, size_t length)
-{
-	Result ret = 0;
-	u32 *cmdbuf = getThreadCommandBuffer();
-
-	cmdbuf[0] = 0x000A0042;
-	cmdbuf[1] = length;
-	cmdbuf[2] = data;
-	cmdbuf[3] = ((length << 8) | 16 * 0 & 0xFF) + 6;
-
-	if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
-	
-	return (Result)cmdbuf[1];
+  return (Result)cmdbuf[1];
 }
 
 static Result WriteTicket(Handle fileHandle, const char *data, uint32_t size)
@@ -402,6 +366,7 @@ int main()
 	}
 
 	printf("Press A to install all tickets.\n");
+  printf("Prexx X to uninstall titles.\n");
 	printf("Press B to exit without installing.\n");
 
 	while(aptMainLoop())
@@ -409,7 +374,8 @@ int main()
 		//exit when user hits B
 		hidScanInput();
 		if(keysHeld()&KEY_B)goto error_no_wait;
-		if(keysHeld()&KEY_A)break;
+    if(keysHeld()&KEY_X)goto uninstall_titles;
+		if(keysHeld()&KEY_A)goto install_tickets;
 
 		//wait & swap
 		gfxFlushBuffers();
@@ -417,6 +383,18 @@ int main()
 		gspWaitForVBlank();
 	}
 
+uninstall_titles:
+  printf("Uninstalling titles.\n");
+  res = AM_DeleteTitle_(0, 0x0004001000020800LL);
+  printf("AM_DeleteTitle: 0x%08X\n", res);
+  res = AM_DeleteTitle_(0, 0x0004001000020E00LL);
+  printf("AM_DeleteTitle: 0x%08X\n", res);
+  res = AM_DeleteTitle_(0, 0x0004001000020700LL);
+  printf("AM_DeleteTitle: 0x%08X\n", res);
+  printf("Done.");
+  goto error;
+
+install_tickets:
 	printf("Setting certificates.\n");
 	u8 *certs[] = {ticket_cert, ticket_rootca};
 	u32 sizes[] = {sizeof(ticket_cert), sizeof(ticket_rootca)};
