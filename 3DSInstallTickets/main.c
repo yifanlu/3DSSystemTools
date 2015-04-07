@@ -297,7 +297,50 @@ static Result AM_DeleteTitle_(u8 mediatype, u64 titleID)
   return (Result)cmdbuf[1];
 }
 
-static Result WriteTicket(Handle fileHandle, const char *data, uint32_t size)
+static Result AM_StartCiaInstall_(u8 mediatype, Handle *ciaHandle)
+{
+  Result ret = 0;
+  u32 *cmdbuf = getThreadCommandBuffer();
+
+  cmdbuf[0] = 0x04020040;
+  cmdbuf[1] = mediatype;
+
+  if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
+
+  *ciaHandle = cmdbuf[3];
+  
+  return (Result)cmdbuf[1];
+}
+
+static Result AM_CancelCIAInstall_(Handle *ciaHandle)
+{
+  Result ret = 0;
+  u32 *cmdbuf = getThreadCommandBuffer();
+
+  cmdbuf[0] = 0x04040002;
+  cmdbuf[1] = 0x10;
+  cmdbuf[2] = *ciaHandle;
+
+  if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
+
+  return (Result)cmdbuf[1];
+}
+
+static Result AM_FinishCiaInstall_(u8 mediatype, Handle *ciaHandle)
+{
+  Result ret = 0;
+  u32 *cmdbuf = getThreadCommandBuffer();
+
+  cmdbuf[0] = 0x04050002;
+  cmdbuf[1] = 0x10;
+  cmdbuf[2] = *ciaHandle;
+
+  if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
+
+  return (Result)cmdbuf[1];
+}
+
+static Result WriteToHandle(Handle fileHandle, const char *data, uint32_t size)
 {
 	Result res;
 	uint32_t offset;
@@ -307,7 +350,7 @@ static Result WriteTicket(Handle fileHandle, const char *data, uint32_t size)
 	while (size)
 	{
 		if ((res = FSFILE_Write(fileHandle, &written, offset, 
-								data+offset, size, 0x00010001)) != 0)
+								data+offset, size, FS_WRITE_FLUSH)) != 0)
 		{
 			return res;
 		}
@@ -326,64 +369,9 @@ static inline uint64_t swapLong(void *X)
 	return x;
 }
 
-int main()
+static void DeleteTitles()
 {
-	Result res;
-	DIR *dp;
-	struct dirent *ep;
-	FILE *file;
-	char path[1024];
-	char *buffer;
-	size_t buffer_size;
-	off_t size;
-	Handle ticket;
-	int success;
-	int total;
-
-	// Initialize services
-	gfxInitDefault(); // graphics
-	hbInit();
-	buffer = NULL;
-	buffer_size = 0;
-
-	consoleInit(GFX_TOP, NULL);
-
-	int tries = 5;
-    while (!doARM11Hax() && tries-- > 0);
-    patch_srv_access();
-
-    printf("ARM11 service patched!\n\n");
-	if ((res = srvGetServiceHandle(&amHandle, "am:net")) != 0)
-	{
-		printf("Error 0x%08X initializing am.\n", res);
-		svcSleepThread(10000000000ULL);
-		goto end;
-	}
-	if ((dp = opendir("sdmc:/tickets")) == NULL)
-	{
-		printf("Cannot find 'tickets' directory\n");
-		goto error;
-	}
-
-	printf("Press A to install all tickets.\n");
-  printf("Prexx X to uninstall titles.\n");
-	printf("Press B to exit without installing.\n");
-
-	while(aptMainLoop())
-	{
-		//exit when user hits B
-		hidScanInput();
-		if(keysHeld()&KEY_B)goto error_no_wait;
-    if(keysHeld()&KEY_X)goto uninstall_titles;
-		if(keysHeld()&KEY_A)goto install_tickets;
-
-		//wait & swap
-		gfxFlushBuffers();
-		gfxSwapBuffersGpu();
-		gspWaitForVBlank();
-	}
-
-uninstall_titles:
+  Result res;
   printf("Uninstalling titles.\n");
   res = AM_DeleteTitle_(0, 0x0004001000020800LL);
   printf("AM_DeleteTitle: 0x%08X\n", res);
@@ -391,105 +379,238 @@ uninstall_titles:
   printf("AM_DeleteTitle: 0x%08X\n", res);
   res = AM_DeleteTitle_(0, 0x0004001000020700LL);
   printf("AM_DeleteTitle: 0x%08X\n", res);
-  printf("Done.");
-  goto error;
+  printf("Done.\n");
+}
 
-install_tickets:
-	printf("Setting certificates.\n");
-	u8 *certs[] = {ticket_cert, ticket_rootca};
-	u32 sizes[] = {sizeof(ticket_cert), sizeof(ticket_rootca)};
-	if ((res = AM_SetCertificates(2, certs, sizes)) != 0)
+static void InstallTickets()
+{
+  Result res;
+  DIR *dp;
+  struct dirent *ep;
+  FILE *file;
+  char path[1024];
+  char *buffer;
+  size_t buffer_size;
+  off_t size;
+  Handle ticket;
+  int success;
+  int total;
+
+  printf("Setting certificates.\n");
+  u8 *certs[] = {ticket_cert, ticket_rootca};
+  u32 sizes[] = {sizeof(ticket_cert), sizeof(ticket_rootca)};
+  if ((res = AM_SetCertificates(2, certs, sizes)) != 0)
+  {
+    printf("Error setting certificates: 0x%08X\n", res);
+    return;
+  }
+
+  if ((dp = opendir("sdmc:/tickets")) == NULL)
+  {
+    printf("Cannot find 'tickets' directory\n");
+    return;
+  }
+
+  buffer = NULL;
+  buffer_size = 0;
+  success = 0;
+  total = 0;
+  while ((ep = readdir(dp)) != NULL)
+  {
+    //wait & swap
+    gfxFlushBuffers();
+    gfxSwapBuffersGpu();
+    gspWaitForVBlank();
+
+    printf("Found %s\n", ep->d_name);
+    total++;
+    snprintf(path, 1024, "%s/%s", "sdmc:/tickets", ep->d_name);
+    if ((file = fopen(path,"rb")) == NULL)
+    {
+      printf("Failed to open %s\n", path);
+      continue;
+    }
+    fseek(file, 0, SEEK_END);
+    size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    if (size <= 0)
+    {
+      printf("Invalid ticket size: %d\n", size);
+      fclose(file);
+      continue;
+    }
+    if (size > buffer_size)
+    {
+      if ((buffer = realloc(buffer, size)) == NULL)
+      {
+        printf("No memory left\n");
+        fclose(file);
+        continue;
+      }
+    }
+    if (fread(buffer, size, 1, file) < 1)
+    {
+      printf("Cannot read ticket\n");
+      fclose(file);
+      continue;
+    }
+    fclose(file);
+    if (*(uint32_t*)buffer == 0x00010004)
+    {
+      printf("Installing %llX\n", swapLong(buffer+0x1DC));
+    }
+    else
+    {
+      printf("Installing %s\n", ep->d_name);
+    }
+    if ((res = AM_OpenTicket(&ticket)) != 0)
+    //if ((res = AM9_InstallTikBegin()) != 0)
+    {
+      printf("Error opening ticket: %08X\n", res);
+      continue;
+    }
+    if ((res = WriteToHandle(ticket, buffer, size)) != 0)
+    //if ((res = AM9_InstallTikWrite(buffer, size)) != 0)
+    {
+      printf("Error writing ticket: %08X\n", res);
+      AM_TicketAbortInstall(ticket);
+      //AM9_InstallTikAbort();
+      continue;
+    }
+    if ((res = AM_TicketFinalizeInstall(ticket)) != 0)
+    //if ((res = AM9_InstallTikFinish()) != 0)
+    {
+      printf("Error finalizing ticket: %08X\n", res);
+      continue;
+    }
+    printf("Installed %s\n", path);
+    success++;
+  }
+  free(buffer);
+  closedir(dp);
+
+  printf("Installed %d/%d successfully.\n", success, total);
+  printf("Finished.\n");
+}
+
+static void InstallCIAs()
+{
+  Result res;
+  DIR *dp;
+  struct dirent *ep;
+  FILE *file;
+  char path[1024];
+  char *buffer;
+  Handle ciaHandle;
+  size_t read;
+  int success;
+  int total;
+
+  if ((dp = opendir("sdmc:/cias")) == NULL)
+  {
+    printf("Cannot find 'cias' directory\n");
+    return;
+  }
+  if ((buffer = malloc(0x800000)) == NULL)
+  {
+    printf("Cannot allocate memory\n");
+    return;
+  }
+
+  success = 0;
+  total = 0;
+  while ((ep = readdir(dp)) != NULL)
+  {
+    //wait & swap
+    gfxFlushBuffers();
+    gfxSwapBuffersGpu();
+    gspWaitForVBlank();
+
+    printf("Found %s\n", ep->d_name);
+    total++;
+    snprintf(path, 1024, "%s/%s", "sdmc:/cias", ep->d_name);
+    if ((file = fopen(path,"rb")) == NULL)
+    {
+      printf("Failed to open %s\n", path);
+      continue;
+    }
+    if ((res = AM_StartCiaInstall_(0, &ciaHandle)) != 0)
+    {
+      printf("Cannot create CIA install handle: 0x%08X\n", res);
+      fclose(file);
+      continue;
+    }
+    while ((read = fread(buffer, 1, 0x800000, file)) > 0)
+    {
+      WriteToHandle(ciaHandle, buffer, read);
+    }
+    fclose(file);
+    if (read < 0)
+    {
+      AM_CancelCIAInstall_(&ciaHandle);
+      printf("Error installing CIA\n");
+      continue;
+    }
+    if ((res = AM_FinishCiaInstall_(0, &ciaHandle)) != 0)
+    {
+      printf("Error finalizing CIA install: 0x%08X\n", res);
+      continue;
+    }
+    printf("Installed %s\n", path);
+    success++;
+  }
+  closedir(dp);
+  free(buffer);
+
+  printf("Installed %d/%d successfully.\n", success, total);
+  printf("Finished.\n");
+}
+
+int main()
+{
+	Result res;
+
+	// Initialize services
+	gfxInitDefault(); // graphics
+	hbInit();
+
+	consoleInit(GFX_TOP, NULL);
+
+	int tries = 5;
+  while (!doARM11Hax() && tries-- > 0);
+  patch_srv_access();
+
+  printf("ARM11 service patched!\n\n");
+	if ((res = srvGetServiceHandle(&amHandle, "am:net")) != 0)
 	{
-		printf("Error setting certificates: 0x%08X\n", res);
-		goto error;
+		printf("Error 0x%08X initializing am.\n", res);
+		svcSleepThread(10000000000ULL);
+		goto end;
 	}
 
-	success = 0;
-	total = 0;
-	while ((ep = readdir(dp)) != NULL)
+  printf("Press A to install all tickets.\n");
+  printf("Press X to uninstall titles.\n");
+  printf("Press Y to install all CIAs.\n");
+  printf("Press B to exit.\n");
+
+	while(aptMainLoop())
 	{
+
+		//exit when user hits B
+		hidScanInput();
+		if(keysHeld()&KEY_B)break;
+    if(keysHeld()&KEY_X)DeleteTitles();
+		if(keysHeld()&KEY_A)InstallTickets();
+    if(keysHeld()&KEY_Y)InstallCIAs();
+
 		//wait & swap
 		gfxFlushBuffers();
 		gfxSwapBuffersGpu();
 		gspWaitForVBlank();
-
-		printf("Found %s\n", ep->d_name);
-		total++;
-		snprintf(path, 1024, "%s/%s", "sdmc:/tickets", ep->d_name);
-		if ((file = fopen(path,"rb")) == NULL)
-		{
-			printf("Failed to open %s\n", path);
-			continue;
-		}
-		fseek(file, 0, SEEK_END);
-		size = ftell(file);
-		fseek(file, 0, SEEK_SET);
-		if (size <= 0)
-		{
-			printf("Invalid ticket size: %d\n", size);
-			fclose(file);
-			continue;
-		}
-		if (size > buffer_size)
-		{
-			if ((buffer = realloc(buffer, size)) == NULL)
-			{
-				printf("No memory left\n");
-				fclose(file);
-				continue;
-			}
-		}
-		if (fread(buffer, size, 1, file) < 1)
-		{
-			printf("Cannot read ticket\n");
-			fclose(file);
-			continue;
-		}
-		fclose(file);
-		if (*(uint32_t*)buffer == 0x00010004)
-		{
-			printf("Installing %llX\n", swapLong(buffer+0x1DC));
-		}
-		else
-		{
-			printf("Installing %s\n", ep->d_name);
-		}
-		if ((res = AM_OpenTicket(&ticket)) != 0)
-		//if ((res = AM9_InstallTikBegin()) != 0)
-		{
-			printf("Error opening ticket: %08X\n", res);
-			continue;
-		}
-		if ((res = WriteTicket(ticket, buffer, size)) != 0)
-		//if ((res = AM9_InstallTikWrite(buffer, size)) != 0)
-		{
-			printf("Error writing ticket: %08X\n", res);
-			AM_TicketAbortInstall(ticket);
-			//AM9_InstallTikAbort();
-			continue;
-		}
-		if ((res = AM_TicketFinalizeInstall(ticket)) != 0)
-		//if ((res = AM9_InstallTikFinish()) != 0)
-		{
-			printf("Error finalizing ticket: %08X\n", res);
-			continue;
-		}
-		printf("Installed %s\n", path);
-		success++;
 	}
-
-	printf("Installed %d/%d successfully.\n", success, total);
-	printf("Finished.\n");
 
 	// Exit services
 	//returning from main() returns to hbmenu when run under ninjhax
-error:
-	gfxFlushBuffers();
-	gfxSwapBuffersGpu();
-	svcSleepThread(10000000000ULL);
-error_no_wait:
-	free(buffer);
-	closedir(dp);
 	svcCloseHandle(amHandle);
 end:
 	//closing all services even more so
