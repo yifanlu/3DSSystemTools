@@ -16,6 +16,7 @@ static u32 curr_kproc;
 static Handle cfgHandle = 0;
 static Handle fsuHandle;
 static Handle fsregHandle;
+static Handle nimHandle;
 
 // service patching code thanks to archshift
 int __attribute__((naked))
@@ -175,6 +176,43 @@ static Result FSUSER_ImportIntegrityVerificationSeed(const u8 *data)
   return (Result)cmdbuf[1];
 }
 
+static Result NIM_Initialize(void)
+{
+  Result ret = 0;
+  u32 *cmdbuf = getThreadCommandBuffer();
+
+  cmdbuf[0] = 0x003F0000;
+
+  if((ret = svcSendSyncRequest(nimHandle))!=0) return ret;
+  
+  return (Result)cmdbuf[1];
+}
+
+static Result NIM_CheckSysupdateAvailableSOAP(u8 *flag)
+{
+  Result ret = 0;
+  u32 *cmdbuf = getThreadCommandBuffer();
+
+  cmdbuf[0] = 0x000A0000;
+
+  if((ret = svcSendSyncRequest(nimHandle))!=0) return ret;
+  *flag = (u8)cmdbuf[2];
+  
+  return (Result)cmdbuf[1];
+}
+
+static Result NIM_UnregisterDevice(void)
+{
+  Result ret = 0;
+  u32 *cmdbuf = getThreadCommandBuffer();
+
+  cmdbuf[0] = 0x000E0000;
+
+  if((ret = svcSendSyncRequest(nimHandle))!=0) return ret;
+  
+  return (Result)cmdbuf[1];
+}
+
 static Result ReinitFSServices(void)
 {
   Result ret = 0;
@@ -208,14 +246,107 @@ static Result ReinitFSServices(void)
   return 0;
 }
 
-int main()
+static void DoExportSeed(void)
 {
   FILE *file;
   Result res;
-  char overflow[8];
   char seed[0x130];
+
+  res = FSUSER_ExportIntegrityVerificationSeed(seed);
+  printf("FSUSER_ExportIntegrityVerificationSeed: 0x%08X\n", res);
+  if (res != 0) return;
+
+  file = fopen("sdmc:/export_seed.bin", "wb");
+  fwrite(seed, 0x130, 1, file);
+  fclose(file);
+  printf("Export seed done.\n");
+}
+
+static void DoImportSeed(void)
+{
+  FILE *file;
+  Result res;
   char friendcodeseed[0x110];
+
+  if ((file = fopen("sdmc:/LocalFriendCodeSeed_B", "rb")) == NULL)
+  {
+    printf("Cannot find LocalFriendCodeSeed_B\n");
+    return;
+  }
+  if (fread(friendcodeseed, sizeof(friendcodeseed), 1, file) < 1)
+  {
+    printf("Error reading friend code seed\n");
+    fclose(file);
+    return;
+  }
+  fclose(file);
+
+  res = CFG_SetGetLocalFriendCodeSeedData(&friendcodeseed[0x100]);
+  printf("CFG_SetGetLocalFriendCodeSeedData: 0x%08X\n", res);
+  if (res != 0) return;
+
+  res = CFG_SetLocalFriendCodeSeedSignature(friendcodeseed, 0x100);
+  printf("CFG_SetLocalFriendCodeSeedSignature: 0x%08X\n", res);
+  if (res != 0) return;
+
+  res = CFG_VerifySigLocalFriendCodeSeed();
+  printf("CFG_VerifySigLocalFriendCodeSeed: 0x%08X\n", res);
+  if (res != 0) return;
+  printf("Finished.\n");
+}
+
+static void DoImportSecureInfo(void)
+{
+  FILE *file;
+  Result res;
   char secureinfo[0x111];
+
+  if ((file = fopen("sdmc:/SecureInfo_A", "rb")) == NULL)
+  {
+    printf("Cannot find SecureInfo_A\n");
+    return;
+  }
+  if (fread(secureinfo, sizeof(secureinfo), 1, file) < 1)
+  {
+    printf("Error reading secure info\n");
+    fclose(file);
+    return;
+  }
+  fclose(file);
+
+  res = CFG_SetSecureInfo(&secureinfo[0x100], 0x11, secureinfo, 0x100);
+  printf("CFG_SetSecureInfo: 0x%08X\n", res);
+  if (res != 0) return;
+
+  res = CFG_VerifySigSecureInfo();
+  printf("CFG_VerifySigSecureInfo: 0x%08X\n", res);
+  if (res != 0) return;
+
+  res = CFG_DeleteCreateNANDSecureInfo();
+  printf("CFG_DeleteCreateNANDSecureInfo: 0x%08X\n", res);
+  
+  printf("Finished.\n");
+}
+
+static void DoUnregister(void)
+{
+  Result res;
+  u8 update;
+
+  res = NIM_Initialize();
+  printf("NIM_Initialize: 0x%08X\n", res);
+
+  res = NIM_CheckSysupdateAvailableSOAP(&update);
+  printf("NIM_CheckSysupdateAvailableSOAP: 0x%08X, flag: %d\n", res, update);
+
+  res = NIM_UnregisterDevice();
+  printf("NIM_UnregisterDevice: 0x%08X\n", res);
+  printf("Finished.\n");
+}
+
+int main()
+{
+  Result res;
 
   // Initialize services
   gfxInitDefault(); // graphics
@@ -231,6 +362,12 @@ int main()
   if ((res = srvGetServiceHandle(&cfgHandle, "cfg:i")) != 0)
   {
     printf("Error 0x%08X initializing cfg.\n", res);
+    svcSleepThread(10000000000ULL);
+    goto end;
+  }
+  if ((res = srvGetServiceHandle(&nimHandle, "nim:s")) != 0)
+  {
+    printf("Error 0x%08X initializing nim.\n", res);
     svcSleepThread(10000000000ULL);
     goto end;
   }
@@ -252,17 +389,21 @@ int main()
   }
   */
 
-  printf("Press A to install.\n");
-  //printf("Press X to export.\n");
-  printf("Press B to exit without installing.\n");
+  printf("Press A to install SecureInfo.\n");
+  printf("Press X to export seed.\n");
+  printf("Press Y to import seed.\n");
+  printf("Press Start to unregister device.\n");
+  printf("Press B to exit.\n");
 
   while(aptMainLoop())
   {
     //exit when user hits B
     hidScanInput();
-    if(keysHeld()&KEY_B)goto error_no_wait;
-    //if(keysHeld()&KEY_X)goto do_export;
-    if(keysHeld()&KEY_A)goto do_import;
+    if(keysHeld()&KEY_B) break;
+    if(keysHeld()&KEY_X) DoExportSeed();
+    if(keysHeld()&KEY_Y) DoImportSeed();
+    if(keysHeld()&KEY_A) DoImportSecureInfo();
+    if(keysHeld()&KEY_START) DoUnregister();
 
     //wait & swap
     gfxFlushBuffers();
@@ -270,89 +411,14 @@ int main()
     gspWaitForVBlank();
   }
 
-do_export:
-  res = FSUSER_ExportIntegrityVerificationSeed(seed);
-  printf("FSUSER_ExportIntegrityVerificationSeed: 0x%08X\n", res);
-  if (res != 0) goto error;
-
-  file = fopen("sdmc:/export_seed.bin", "wb");
-  fwrite(seed, 0x130, 1, file);
-  fclose(file);
-  printf("Export seed done.\n");
-
-  goto error;
-
-do_import:
-  if ((file = fopen("sdmc:/LocalFriendCodeSeed_B", "rb")) == NULL)
-  {
-    printf("Cannot find LocalFriendCodeSeed_B\n");
-    goto error;
-  }
-  if (fread(friendcodeseed, sizeof(friendcodeseed), 1, file) < 1)
-  {
-    printf("Error reading friend code seed\n");
-    fclose(file);
-    goto error;
-  }
-  fclose(file);
-
-  if ((file = fopen("sdmc:/SecureInfo_A", "rb")) == NULL)
-  {
-    printf("Cannot find SecureInfo_A\n");
-    goto error;
-  }
-  if (fread(secureinfo, sizeof(secureinfo), 1, file) < 1)
-  {
-    printf("Error reading secure info\n");
-    fclose(file);
-    goto error;
-  }
-  fclose(file);
-
-  /*
-  memset(overflow, 0, sizeof(overflow));
-  res = CFG_SetGetLocalFriendCodeSeedData(&friendcodeseed[0x100]);
-  printf("CFG_SetGetLocalFriendCodeSeedData: 0x%08X\n", res);
-  if (res != 0) goto error;
-  printf("Data: 0x%Xll\n", *(u64*)overflow);
-
-  res = CFG_SetLocalFriendCodeSeedSignature(friendcodeseed, 0x100);
-  printf("CFG_SetLocalFriendCodeSeedSignature: 0x%08X\n", res);
-  if (res != 0) goto error;
-
-  res = CFG_VerifySigLocalFriendCodeSeed();
-  printf("CFG_VerifySigLocalFriendCodeSeed: 0x%08X\n", res);
-  if (res != 0) goto error;
-  */
-
-  res = CFG_SetSecureInfo(&secureinfo[0x100], 0x11, secureinfo, 0x100);
-  printf("CFG_SetSecureInfo: 0x%08X\n", res);
-  if (res != 0) goto error;
-
-  res = CFG_VerifySigSecureInfo();
-  printf("CFG_VerifySigSecureInfo: 0x%08X\n", res);
-  if (res != 0) goto error;
-
-  res = CFG_DeleteCreateNANDSecureInfo();
-  printf("CFG_DeleteCreateNANDSecureInfo: 0x%08X\n", res);
-  
-  printf("Finished.\n");
-
   // Exit services
   //returning from main() returns to hbmenu when run under ninjhax
-error:
-  gfxFlushBuffers();
-  gfxSwapBuffersGpu();
-  svcSleepThread(10000000000ULL);
-error_no_wait:
   svcCloseHandle(cfgHandle);
-  //svcCloseHandle(fsregHandle);
 end:
+  //svcCloseHandle(fsregHandle);
   //closing all services even more so
   hbExit();
   gfxExit();
-
-  *(u32*)NULL = NULL;
 
   return 0;
 }
