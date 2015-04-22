@@ -2,6 +2,8 @@
 
 Uses [service-patch](https://github.com/archshift/service-patch) and [libkhax](https://github.com/Myriachan/libkhax) to do manual system transfer.
 
+To compile, you must modify "fs.c" in ctrulib and change "static Handle fsuHandle" to "Handle fsuHandle"
+
 On your old system, run this tool and press X to export the seed.
 
 On your new system, place "export_seed.bin" on your SD card and run this tool.
