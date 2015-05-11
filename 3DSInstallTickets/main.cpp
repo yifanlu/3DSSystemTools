@@ -5,10 +5,10 @@
 #include <malloc.h>
 #include <dirent.h>
 
-#include "bootstrap.h"
-
-static const u32 KPROC_OFFSET_PID_O3DS = 0xB4;
-static const u32 KPROC_OFFSET_PID_N3DS = 0xBC;
+#include "khax.h"
+#include "constants.h"
+#include "kernel11.h"
+#include "patches.h"
 
 static const u8 ticket_cert[] = {
   0x00, 0x01, 0x00, 0x04, 0x91, 0x9e, 0xbe, 0x46, 0x4a, 0xd0, 0xf5, 0x52,
@@ -171,51 +171,6 @@ static u32 self_pid;
 static u32 curr_kproc;
 static Handle amHandle = 0;
 
-// service patching code thanks to archshift
-int __attribute__((naked))
-    arm11_kernel_execute(int (*func)(void))
-{
-    asm volatile ("svc #0x7B \t\n"
-                  "bx lr     \t\n");
-}
-
-int patch_pid() {
-    // 0xFFFF9004 always points to the current KProcess
-    curr_kproc = *(u32*)0xFFFF9004;
-    *(u32*)(curr_kproc + kproc_offset_pid) = 0;
-    return 0;
-}
-
-int unpatch_pid() {
-    *(u32*)(curr_kproc + kproc_offset_pid) = self_pid;
-    return 0;
-}
-
-void reinit_srv() {
-    srvExit();
-    srvInit();
-}
-
-void patch_srv_access() {
-	u8 isN3DS = 0;
-	APT_CheckNew3DS(NULL, &isN3DS);
-	kproc_offset_pid = isN3DS ? KPROC_OFFSET_PID_N3DS : KPROC_OFFSET_PID_O3DS;
-
-    svcGetProcessId(&self_pid, 0xFFFF8001);
-    printf("Current process id: %lu\n", self_pid);
-
-    printf("Patching srv access...");
-    arm11_kernel_execute(patch_pid);
-    reinit_srv();
-
-    u32 new_pid;
-    svcGetProcessId(&new_pid, 0xFFFF8001);
-    printf("%s\n", new_pid == 0 ? "succeeded!" : "failed!");
-
-    // Cleanup; won't take effect until srv is reinitialized
-    arm11_kernel_execute(unpatch_pid);
-}
-
 static Result AM_OpenTicket(Handle *fileHandle)
 {
 	Result ret = 0;
@@ -269,13 +224,13 @@ static Result AM_SetCertificates(int count, const u8 *certs[4], u32 sizes[4])
 	cmdbuf[3] = count > 2 ? sizes[2] : 0;
 	cmdbuf[4] = count > 3 ? sizes[3] : 0;
 	cmdbuf[5] = 16 * (count > 0 ? sizes[0] : 0) + 10;
-	cmdbuf[6] = count > 0 ? certs[0] : 0;
+	cmdbuf[6] = count > 0 ? (u32)certs[0] : 0;
 	cmdbuf[7] = 16 * (count > 1 ? sizes[1] : 0) + 10;
-	cmdbuf[8] = count > 1 ? certs[1] : 0;
+	cmdbuf[8] = count > 1 ? (u32)certs[1] : 0;
 	cmdbuf[9] = 16 * (count > 2 ? sizes[2] : 0) + 10;
-	cmdbuf[10] = count > 2 ? certs[2] : 0;
+	cmdbuf[10] = count > 2 ? (u32)certs[2] : 0;
 	cmdbuf[11] = 16 * (count > 3 ? sizes[3] : 0) + 10;
-	cmdbuf[12] = count > 3 ? certs[3] : 0;
+	cmdbuf[12] = count > 3 ? (u32)certs[3] : 0;
 
 	if((ret = svcSendSyncRequest(amHandle))!=0) return ret;
 	
@@ -373,11 +328,10 @@ static void DeleteTitles()
 {
   Result res;
   printf("Uninstalling titles.\n");
-  res = AM_DeleteTitle_(0, 0x0004001000020800LL);
+  //res = AM_DeleteTitle_(0, 0x0004001000021A00LL);
+  res = AM_DeleteTitle_(0, 0x00040000000eca00LL);
   printf("AM_DeleteTitle: 0x%08X\n", res);
-  res = AM_DeleteTitle_(0, 0x0004001000020E00LL);
-  printf("AM_DeleteTitle: 0x%08X\n", res);
-  res = AM_DeleteTitle_(0, 0x0004001000020700LL);
+  res = AM_DeleteTitle_(0, 0x00040000000eca00LL);
   printf("AM_DeleteTitle: 0x%08X\n", res);
   printf("Done.\n");
 }
@@ -397,8 +351,8 @@ static void InstallTickets()
   int total;
 
   printf("Setting certificates.\n");
-  u8 *certs[] = {ticket_cert, ticket_rootca};
-  u32 sizes[] = {sizeof(ticket_cert), sizeof(ticket_rootca)};
+  const u8 *certs[4] = {ticket_cert, ticket_rootca};
+  u32 sizes[4] = {sizeof(ticket_cert), sizeof(ticket_rootca)};
   if ((res = AM_SetCertificates(2, certs, sizes)) != 0)
   {
     printf("Error setting certificates: 0x%08X\n", res);
@@ -441,7 +395,7 @@ static void InstallTickets()
     }
     if (size > buffer_size)
     {
-      if ((buffer = realloc(buffer, size)) == NULL)
+      if ((buffer = (char *)realloc(buffer, size)) == NULL)
       {
         printf("No memory left\n");
         fclose(file);
@@ -511,7 +465,7 @@ static void InstallCIAs()
     printf("Cannot find 'cias' directory\n");
     return;
   }
-  if ((buffer = malloc(0x800000)) == NULL)
+  if ((buffer = (char *)malloc(0x800000)) == NULL)
   {
     printf("Cannot allocate memory\n");
     return;
@@ -534,7 +488,7 @@ static void InstallCIAs()
       printf("Failed to open %s\n", path);
       continue;
     }
-    if ((res = AM_StartCiaInstall_(0, &ciaHandle)) != 0)
+    if ((res = AM_StartCiaInstall_(1, &ciaHandle)) != 0)
     {
       printf("Cannot create CIA install handle: 0x%08X\n", res);
       fclose(file);
@@ -551,7 +505,7 @@ static void InstallCIAs()
       printf("Error installing CIA\n");
       continue;
     }
-    if ((res = AM_FinishCiaInstall_(0, &ciaHandle)) != 0)
+    if ((res = AM_FinishCiaInstall_(1, &ciaHandle)) != 0)
     {
       printf("Error finalizing CIA install: 0x%08X\n", res);
       continue;
@@ -576,11 +530,13 @@ int main()
 
 	consoleInit(GFX_TOP, NULL);
 
-	int tries = 5;
-  while (!doARM11Hax() && tries-- > 0);
-  patch_srv_access();
+  res = khaxInit();
+  printf("khaxInit returned %08lx\n", res);
 
-  printf("ARM11 service patched!\n\n");
+  SaveVersionConstants();
+  PatchSrvAccess();
+  printf("[%08X] Patched process\n", KernelBackdoor(PatchProcess));
+  HB_FlushInvalidateCache(); // Just to be sure!
 	if ((res = srvGetServiceHandle(&amHandle, "am:net")) != 0)
 	{
 		printf("Error 0x%08X initializing am.\n", res);
